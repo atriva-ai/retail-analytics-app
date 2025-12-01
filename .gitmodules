@@ -1,12 +1,12 @@
-[submodule "dashboard-ui"]
-	path = dashboard-ui
-	url = https://github.com/atriva-ai/retail-dashboard.git
-[submodule "dashboard-backend"]
-	path = dashboard-backend
-	url = https://github.com/atriva-ai/retail-backend.git
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/atriva-ai/retail-analytics-frontend.git
+[submodule "backend"]
+	path = backend
+	url = https://github.com/atriva-ai/atriva-ai-platform-backend.git
 [submodule "services/ai-inference"]
 	path = services/ai-inference
-	url = https://github.com/atriva-ai/atriva-ai-openvino.git
+	url = https://github.com/atriva-ai/ai-inference-ov.git
 [submodule "services/video-pipeline"]
 	path = services/video-pipeline
-	url = https://github.com/atriva-ai/atriva-video-pipe-ffmpeg.git
+	url = https://github.com/atriva-ai/video-pipeline-ffmpeg-x86.git
