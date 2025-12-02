@@ -7,7 +7,7 @@ services:
       - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost
     volumes:
-      - ./dashboard-ui:/app
+      - ./frontend:/app
       - frontend_next:/app/.next
     command: npm run dev
 

@@ -1,7 +1,8 @@
 services:
   frontend:
     build:
-      context: ./dashboard-ui
+      context: ./frontend
+      dockerfile: Dockerfile.dev
       args:
         - NEXT_PUBLIC_API_URL=http://localhost
     ports:
@@ -9,21 +10,24 @@ services:
     environment:
       - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost
+      # Add network IPs that will access the dev server (comma-separated)
+      # Example: - ALLOWED_DEV_ORIGINS=192.168.9.187,192.168.1.100
+      - ALLOWED_DEV_ORIGINS=${ALLOWED_DEV_ORIGINS:-}
     volumes:
-      - ./dashboard-ui:/app
+      - ./frontend:/app
       - frontend_node_modules:/app/node_modules
       - frontend_next:/app/.next
     depends_on:
       - backend
     networks:
       - retail-net
-    command: npm run dev
+    command: npm run dev -- -H 0.0.0.0
 
   backend:
     build:
-      context: ./dashboard-backend
+      context: ./backend
     env_file:
-      - ./dashboard-backend/.env
+      - ./backend/.env
     environment:
       - ENV=development
       - VIDEO_PIPELINE_URL=http://video_pipeline:8002
@@ -40,8 +44,12 @@ services:
     image: postgres:15.5
     ports:
       - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-atriva}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-PassworD}
+      - POSTGRES_DB=${POSTGRES_DB:-atrv-retail}
     env_file:
-      - ./dashboard-backend/.env
+      - ./backend/.env
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -51,8 +59,6 @@ services:
     build: ./services/ai-inference
     ports:
       - "8001:8001"
-    env_file:
-      - ./services/ai-inference/.env
     volumes:
       - shared-temp-data:/app/shared
       - shared-frames-data:/app/frames
@@ -65,8 +71,6 @@ services:
     build: ./services/video-pipeline
     ports:
       - "8002:8002"
-    env_file:
-      - ./services/video-pipeline/.env
     volumes:
       - shared-temp-data:/app/shared
       - shared-frames-data:/app/frames
@@ -84,6 +88,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
+      - frontend
       - backend
       - video_pipeline
       - ai_inference

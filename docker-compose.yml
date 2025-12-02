@@ -1,7 +1,7 @@
 services:
   frontend:
     build:
-      context: ./dashboard-ui
+      context: ./frontend
     ports:
       - "3000:3000"
     environment:
@@ -16,9 +16,9 @@ services:
 
   backend:
     build:
-      context: ./dashboard-backend
+      context: ./backend
     env_file:
-      - ./dashboard-backend/.env
+      - ./backend/.env
     environment:
       - VIDEO_PIPELINE_URL=http://video_pipeline:8002
     ports:
@@ -32,8 +32,12 @@ services:
     image: postgres:15.5
     ports:
       - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-atriva}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-PassworD}
+      - POSTGRES_DB=${POSTGRES_DB:-atrv-retail}
     env_file:
-      - ./dashboard-backend/.env
+      - ./backend/.env
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -43,8 +47,6 @@ services:
     build: ./services/ai-inference
     ports:
       - "8001:8001"
-    env_file:
-      - ./services/ai-inference/.env
     volumes:
       - shared-temp-data:/app/shared
     extra_hosts:
@@ -56,8 +58,6 @@ services:
     build: ./services/video-pipeline
     ports:
       - "8002:8002"
-    env_file:
-      - ./services/video-pipeline/.env
     volumes:
       - shared-temp-data:/app/shared
     extra_hosts:
@@ -74,6 +74,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
+      - frontend
       - backend
       - video_pipeline
       - ai_inference
