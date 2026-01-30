@@ -33,6 +33,8 @@ services:
       - VIDEO_PIPELINE_URL=http://video_pipeline:8002
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
     depends_on:
       - db
       - video_pipeline
