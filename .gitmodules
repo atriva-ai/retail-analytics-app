@@ -10,3 +10,9 @@
 [submodule "services/video-pipeline"]
 	path = services/video-pipeline
 	url = https://github.com/atriva-ai/video-pipeline-ffmpeg-x86.git
+[submodule "services/ai-inference-rk3588"]
+	path = services/ai-inference-rk3588
+	url = git@github.com:atriva-ai/ai-inference-rk3588.git
+[submodule "services/video-pipeline-ffmpeg-rk3588"]
+	path = services/video-pipeline-ffmpeg-rk3588
+	url = git@github.com:atriva-ai/video-pipeline-ffmpeg-rk3588.git
