@@ -1,0 +1,126 @@
+# Platform: Rockchip RK3588 — ARM64 with RKNN NPU + Mali GPU
+# Usage: docker compose -f docker-compose.rk3588.yml up --build
+# Hardware: Orange Pi 5, Rock 5B, Radxa Zero 3, FriendlyElec CM3588, NanoPC-T6
+#
+# Prerequisites before building:
+#   services/ai-inference-rk3588/rknpu/ must contain:
+#     - librknnrt.so       (Rockchip RKNN runtime, from rknn-toolkit2 release)
+#     - rknn_server        (RKNN server binary, from rknn-toolkit2 release)
+#     - rknn_toolkit2-*.whl (Python wheel, from rknn-toolkit2 release)
+#     - start_rknn.sh / restart_rknn.sh
+#
+# Cross-build from x86 host: ensure Docker buildx with linux/arm64 support is enabled.
+#   docker buildx create --use
+#   docker buildx inspect --bootstrap
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      platform: linux/arm64
+    ports:
+      - "3000:3000"
+    environment:
+      - INTERNAL_API_URL=http://nginx
+      - NEXT_PUBLIC_API_URL=http://localhost
+    volumes:
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - retail-net
+
+  backend:
+    build:
+      context: ./backend
+      platform: linux/arm64
+    env_file:
+      - ./backend/.env
+    environment:
+      - VIDEO_PIPELINE_URL=http://video_pipeline:8002
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - retail-net
+
+  db:
+    image: postgres:15.5
+    platform: linux/arm64
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-atriva}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-PassworD}
+      - POSTGRES_DB=${POSTGRES_DB:-atrv-retail}
+    env_file:
+      - ./backend/.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - retail-net
+
+  ai_inference:
+    build:
+      context: ./services/ai-inference-rk3588
+      platform: linux/arm64
+    ports:
+      - "8001:8001"
+    volumes:
+      - shared-temp-data:/app/shared
+    devices:
+      - /dev/dri:/dev/dri              # Mali GPU
+      - /dev/dma_heap:/dev/dma_heap    # Zero-copy DMA buffer sharing (NPU ↔ CPU ↔ GPU)
+    group_add:
+      - video
+      - render
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - retail-net
+
+  video_pipeline:
+    build:
+      context: ./services/video-pipeline-ffmpeg-rk3588
+      platform: linux/arm64
+    ports:
+      - "8002:8002"
+    volumes:
+      - shared-temp-data:/app/shared
+    devices:
+      - /dev/dri:/dev/dri              # Mali GPU — jellyfin-ffmpeg hardware decode (rkmpp)
+      - /dev/dma_heap:/dev/dma_heap    # DMA buffer sharing
+    group_add:
+      - video
+      - render
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - retail-net
+
+  nginx:
+    image: nginx:1.25.3-alpine
+    platform: linux/arm64
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - backend
+      - video_pipeline
+      - ai_inference
+    networks:
+      - retail-net
+
+volumes:
+  pgdata:
+  shared-temp-data:
+  frontend_node_modules:
+
+networks:
+  retail-net:
+    driver: bridge

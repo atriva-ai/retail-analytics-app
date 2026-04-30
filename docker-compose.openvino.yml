@@ -1,0 +1,102 @@
+# Platform: Intel OpenVINO — x86_64 with Intel CPU / iGPU / Arc GPU
+# Usage: docker compose -f docker-compose.openvino.yml up --build
+# Hardware: Intel Core/Xeon, integrated GPU (UHD/Iris/Arc), OpenVINO CPU plugin fallback
+#
+# Device mounts (/dev/dri) enable hardware-accelerated inference and video decode via VAAPI.
+# Remove the `devices` blocks if running on a machine without an Intel GPU.
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - INTERNAL_API_URL=http://nginx
+      - NEXT_PUBLIC_API_URL=http://localhost
+    volumes:
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - retail-net
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      - VIDEO_PIPELINE_URL=http://video_pipeline:8002
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - retail-net
+
+  db:
+    image: postgres:15.5
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-atriva}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-PassworD}
+      - POSTGRES_DB=${POSTGRES_DB:-atrv-retail}
+    env_file:
+      - ./backend/.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - retail-net
+
+  ai_inference:
+    build: ./services/ai-inference
+    ports:
+      - "8001:8001"
+    volumes:
+      - shared-temp-data:/app/shared
+    devices:
+      - /dev/dri:/dev/dri  # Intel GPU — OpenVINO GPU plugin + iGPU inference
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - retail-net
+
+  video_pipeline:
+    build: ./services/video-pipeline
+    ports:
+      - "8002:8002"
+    volumes:
+      - shared-temp-data:/app/shared
+    devices:
+      - /dev/dri:/dev/dri  # Intel VAAPI — hardware video decode/encode
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - retail-net
+
+  nginx:
+    image: nginx:1.25.3-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - backend
+      - video_pipeline
+      - ai_inference
+    networks:
+      - retail-net
+
+volumes:
+  pgdata:
+  shared-temp-data:
+  frontend_node_modules:
+
+networks:
+  retail-net:
+    driver: bridge
