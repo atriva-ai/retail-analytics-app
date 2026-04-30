@@ -16,3 +16,6 @@
 [submodule "services/video-pipeline-ffmpeg-rk3588"]
 	path = services/video-pipeline-ffmpeg-rk3588
 	url = git@github.com:atriva-ai/video-pipeline-ffmpeg-rk3588.git
+[submodule "services/deepstream-jetson"]
+	path = services/deepstream-jetson
+	url = git@github.com:atriva-ai/deepstream-jetson.git

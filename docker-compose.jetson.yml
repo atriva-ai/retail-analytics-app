@@ -1,0 +1,107 @@
+# Platform: NVIDIA Jetson — Orin / AGX / NX
+# Usage: docker compose -f docker-compose.jetson.yml up --build
+# Hardware: Jetson Orin AGX/NX/Nano, Jetson Xavier AGX/NX
+#
+# Prerequisites:
+#   - nvidia-container-toolkit installed on host
+#   - Docker runtime configured to use nvidia (/etc/docker/daemon.json)
+#   - JetPack 5.x + DeepStream 6.2 on host (provides kernel drivers)
+#   - PeopleNet + ReID ONNX models in services/edge-retail-intelligence/core_engine/models/
+#     (TRT .engine files are auto-generated on first run, ~5 min — cached in deepstream_engine_cache volume)
+#
+# Camera pre-configuration (choose one):
+#   a) CAMERAS_JSON env var: '{"1":"rtsp://cam1","2":"rtsp://cam2"}'
+#   b) Call POST /api/v1/ai-inference/cameras/register after startup
+#   c) Pass rtsp_url= when calling POST /inference/continuous/start
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - INTERNAL_API_URL=http://nginx
+      - NEXT_PUBLIC_API_URL=http://localhost
+    volumes:
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - retail-net
+
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # DeepStream handles video decode AND AI inference — single service on :8001
+      - AI_INFERENCE_URL=http://deepstream_service:8001
+      - AI_SERVICE_URL=http://deepstream_service:8001
+      # No VIDEO_PIPELINE_URL — DeepStream owns the RTSP pipeline internally
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - deepstream_service
+    networks:
+      - retail-net
+
+  db:
+    image: postgres:15.5
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-atriva}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-PassworD}
+      - POSTGRES_DB=${POSTGRES_DB:-atrv-retail}
+    env_file:
+      - ./backend/.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - retail-net
+
+  deepstream_service:
+    build:
+      context: ./services/deepstream-jetson
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+      - CORE_ENGINE_DIR=/workspace/core_engine
+      - ZMQ_ENDPOINT=tcp://localhost:5555
+      # Pre-seed cameras: '{"<backend_camera_id>": "rtsp://host:port/stream"}'
+      - CAMERAS_JSON=${CAMERAS_JSON:-}
+    ports:
+      - "8001:8001"
+    volumes:
+      # Persist TRT .engine files — expensive to regenerate (~5 min per model on first run)
+      - deepstream_engine_cache:/workspace/core_engine/models
+    networks:
+      - retail-net
+
+  nginx:
+    image: nginx:1.25.3-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - backend
+      - deepstream_service
+    networks:
+      - retail-net
+
+volumes:
+  pgdata:
+  frontend_node_modules:
+  deepstream_engine_cache:
+
+networks:
+  retail-net:
+    driver: bridge
