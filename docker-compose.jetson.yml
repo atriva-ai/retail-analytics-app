@@ -11,8 +11,9 @@
 #
 # Camera pre-configuration (choose one):
 #   a) CAMERAS_JSON env var: '{"1":"rtsp://cam1","2":"rtsp://cam2"}'
-#   b) Call POST /api/v1/ai-inference/cameras/register after startup
-#   c) Pass rtsp_url= when calling POST /inference/continuous/start
+#   b) Call POST /cameras/register on deepstream_service:8001 after startup
+#   c) Activate a camera in the UI — the backend calls the video-pipeline shim which
+#      registers the RTSP URL and starts the DeepStream pipeline automatically
 
 services:
   frontend:
@@ -39,7 +40,10 @@ services:
       # DeepStream handles video decode AND AI inference — single service on :8001
       - AI_INFERENCE_URL=http://deepstream_service:8001
       - AI_SERVICE_URL=http://deepstream_service:8001
-      # No VIDEO_PIPELINE_URL — DeepStream owns the RTSP pipeline internally
+      # VIDEO_PIPELINE_URL points to the same deepstream_service which exposes a
+      # video-pipeline shim under /api/v1/video-pipeline/* — this lets the backend
+      # use its standard camera activation flow without any platform-specific code.
+      - VIDEO_PIPELINE_URL=http://deepstream_service:8001
     ports:
       - "8000:8000"
     depends_on:
