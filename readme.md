@@ -1,135 +1,136 @@
-# 🛍️ Retail Dashboard App
+# Retail Analytics App
 
-Monorepo for the Retail Dashboard system — combining **dashboard UI**, **backend APIs**, and **supporting microservices** like AI inference, video pipeline, and analytics engine.
-
-Built with **Docker Compose** for easy development and deployment.  
-Submodules are used to cleanly separate each component.
+Edge AI system for retail analytics — person tracking, cross-camera re-identification, and loitering detection. Runs on NVIDIA Jetson hardware using DeepStream and TensorRT.
 
 ---
 
-## 📦 Project Structure
+## Architecture
 
 ```
-retail-dashboard-app/
-├── retail-dashboard/        # Frontend (Next.js or similar)
-├── retail-backend/          # Backend API (FastAPI, Node.js, etc.)
+RTSP Cameras
+    ↓
+deepstream_service  — C++ DeepStream pipeline (detection, tracking, ReID)
+    ↓ ZeroMQ
+backend             — FastAPI (camera management, event storage, loitering rules)
+    ↓
+frontend            — Next.js dashboard
+    ↓
+nginx               — Reverse proxy (port 80)
+```
+
+See [PLATFORMS.md](PLATFORMS.md) for OpenVINO (x86) and RK3588 deployment variants.
+
+---
+
+## Quick Start — Jetson
+
+### Prerequisites
+
+- NVIDIA Jetson Orin NX / AGX / Xavier with JetPack 5.x
+- Docker with nvidia runtime as default (`docker info | grep "Default Runtime"`)
+- NGC account with API key — [ngc.nvidia.com](https://ngc.nvidia.com)
+
+### 1. Clone
+
+```bash
+git clone --recurse-submodules git@github.com:atriva-ai/retail-analytics-app.git
+cd retail-analytics-app
+```
+
+### 2. Download AI models (one-time per device)
+
+Models are not stored in Git. Download them before building the Docker image. TRT engines are auto-generated from these ONNX files on first container start and written back to the same directory.
+
+```bash
+cd services/deepstream-jetson
+export NGC_API_KEY=<your_key>
+./scripts/download_peoplenet.sh   # → models/peoplenet/resnet34_peoplenet_int8.onnx
+./scripts/download_reid.sh        # → models/reid/resnet50_market1501_aicity156.onnx
+cd ../..
+```
+
+### 3. Configure environment
+
+```bash
+cp backend/.env.example backend/.env
+# Edit backend/.env to set POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+```
+
+### 4. Build and start
+
+```bash
+docker compose -f docker-compose.jetson.yml up --build
+```
+
+First run takes **8–12 minutes** — Docker image builds (~5 min) then TRT engine generation (~3–5 min, one-time). Subsequent starts are ~30 seconds.
+
+All 5 services are ready when you see:
+```
+deepstream_service  | ZMQ subscriber started
+backend             | Application startup complete.
+frontend            | ▲ Next.js ready
+```
+
+### 5. Register cameras and verify
+
+```bash
+# Register RTSP streams
+curl -X POST "http://localhost:8001/cameras/register?camera_id=cam1&rtsp_url=rtsp://<host>:<port>/stream1"
+
+# Check pipeline is live
+curl http://localhost:8001/api/v1/video-pipeline/debug/
+# → {"pipeline_alive": true, ...}
+
+# Check detections are flowing
+curl http://localhost:8001/shared/cameras/cam1/detections/latest
+
+# Open dashboard
+open http://localhost
+```
+
+For detailed DeepStream pipeline documentation, model configuration, and diagnostic tools, see [`services/deepstream-jetson/README.md`](services/deepstream-jetson/README.md).
+
+---
+
+## Project Structure
+
+```
+retail-analytics-app/
+├── frontend/                     # Next.js dashboard
+├── backend/                      # FastAPI — camera registry, detection store, loitering API
 ├── services/
-│   ├── ai_inference/        # AI Inference service
-│   ├── video_pipeline/      # Video stream processing
-│   └── analytics_engine/    # Analytics and metrics aggregation
-├── docker-compose.yml      # Docker Compose configuration
-└── README.md
+│   └── deepstream-jetson/        # C++ DeepStream pipeline + Python FastAPI shim (Jetson)
+├── nginx/
+│   ├── conf.d/                   # Shared nginx config (OpenVINO / RK3588)
+│   └── conf.d.jetson/            # Jetson-specific nginx config
+├── docker-compose.jetson.yml     # Jetson full-stack compose
+├── PLATFORMS.md                  # Multi-platform build and deployment guide
+└── docs/test-reports/            # Test reports
 ```
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Clone the Repository
+## Stopping and restarting
 
 ```bash
-git clone --recurse-submodules https://github.com/your-org/retail-dashboard-app.git
-cd retail-dashboard-app
-```
+# Stop (keeps volumes/data)
+docker compose -f docker-compose.jetson.yml down
 
-If you forgot `--recurse-submodules`:
+# Restart without rebuild (uses cached TRT engines — fast)
+docker compose -f docker-compose.jetson.yml up
 
-```bash
-git submodule update --init --recursive
-```
-
----
-
-### 2. Build and Start All Services
-
-```bash
-docker-compose up --build
-```
-
-Or to start without rebuilding:
-
-```bash
-docker-compose up
-```
-
-Visit:
-
-- Frontend (Dashboard UI): [http://localhost:3000](http://localhost:3000)
-- Backend API: [http://localhost:8000](http://localhost:8000)
-
----
-
-### 3. Stopping the Services
-
-```bash
-docker-compose down
+# Full rebuild (needed after code changes)
+docker compose -f docker-compose.jetson.yml up --build
 ```
 
 ---
 
-## 🔥 Development Tips
+## Environment variables
 
-- Frontend and backend can be run separately for faster dev.
-- You can edit code locally with **hot reload** using a `docker-compose.override.yml` (optional).
-- Use named Docker volumes to persist data where needed.
-- Update submodules if upstream repositories change:
-
-```bash
-git submodule update --remote --merge
-```
-
----
-
-## ⚙️ Environment Variables
-
-Each subproject may require its own `.env` file:
-
-| Project             | Env File                 | Example Variable            |
-|---------------------|---------------------------|------------------------------|
-| retail-dashboard    | `.env.local`               | `NEXT_PUBLIC_API_URL=http://localhost:8000` |
-| retail_backend      | `.env`                     | `DATABASE_URL=postgresql://user:pass@db:5432/retail` |
-| ai_inference        | `.env`                     | `MODEL_PATH=/models/latest` |
-| video_pipeline      | `.env`                     | `VIDEO_INPUT_STREAM=rtsp://camera` |
-| analytics_engine    | `.env`                     | `ANALYTICS_DB_URL=postgresql://user:pass@db:5432/analytics` |
-
-> Example `.env` files are provided inside each submodule when available.
-
----
-
-## 🛠️ Managing Git Submodules
-
-| Command | Purpose |
-|:---|:---|
-| `git submodule add <repo> <path>` | Add a new submodule |
-| `git submodule update --init --recursive` | Initialize and pull submodules |
-| `git submodule update --remote --merge` | Update submodules to latest |
-
----
-
-## 🧠 Useful Docker Commands
-
-| Command | Purpose |
-|:---|:---|
-| `docker-compose build` | Build containers |
-| `docker-compose up` | Start containers |
-| `docker-compose down` | Stop and remove containers |
-| `docker-compose logs -f <service>` | Tail logs for a service |
-
----
-
-## 📜 License
-
-This project is licensed under [MIT License](LICENSE).
-
----
-
-# ✨ Notes
-
-- Ensure you have **Docker** and **Docker Compose v2** installed.
-- This monorepo is designed to be scalable — easily add more services under `/services`.
-- Optional: add a `Makefile` for quicker commands like `make start`, `make stop`.
-
----
-
-# 🚀 Happy Building!
-
+| Variable | Service | Default | Purpose |
+|---|---|---|---|
+| `POSTGRES_USER` | db, backend | `atriva` | Database user |
+| `POSTGRES_PASSWORD` | db, backend | — | Database password (set in `backend/.env`) |
+| `POSTGRES_DB` | db, backend | `atrv-retail` | Database name |
+| `CAMERAS_JSON` | deepstream_service | — | Pre-seed cameras: `{"cam1":"rtsp://..."}` |
+| `NGC_API_KEY` | host (download scripts) | — | NGC model download |
