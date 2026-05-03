@@ -1,0 +1,16 @@
+# Claude Code local settings — personal, not shared
+.claude/
+
+# Backend secrets
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Editor
+.vscode/
+*.swp
+*.swo

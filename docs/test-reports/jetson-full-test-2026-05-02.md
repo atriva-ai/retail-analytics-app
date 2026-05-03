@@ -24,144 +24,11 @@
 
 ---
 
-## Running from Scratch
+## Setup Instructions
 
-This section documents the complete setup sequence for a new Jetson device.
+For step-by-step instructions to run the application from scratch on a new Jetson device, see the **[README — Quick Start](../../readme.md#quick-start--jetson)**.
 
-### Prerequisites
-
-- NVIDIA Jetson Orin NX (or AGX/NX) with JetPack 5.x installed
-- Docker with nvidia runtime configured:
-  ```bash
-  # Verify nvidia runtime is the default
-  docker info | grep -i runtime
-  # Should show: Default Runtime: nvidia
-  ```
-- NGC account (free) with API key — get one at [ngc.nvidia.com](https://ngc.nvidia.com)
-- Git with SSH access to the repository
-
-### Step 1 — Clone the repository
-
-```bash
-git clone --recurse-submodules git@github.com-atriva:atriva-ai/retail-analytics-app.git
-cd retail-analytics-app
-```
-
-If you already cloned without `--recurse-submodules`:
-```bash
-git submodule update --init --recursive
-```
-
-### Step 2 — Download AI models (one-time per device)
-
-Models are not stored in Git. Download them to the host before building Docker images. TRT engine files are generated from these ONNX files on first container start and written back to the same directory — this step only needs to run once per device.
-
-```bash
-cd services/deepstream-jetson
-
-export NGC_API_KEY=<your_ngc_api_key>
-
-# PeopleNet v2.3.3 — person detector (ResNet-34, INT8 ONNX, ~8.4 MB)
-./scripts/download_peoplenet.sh
-# → models/peoplenet/resnet34_peoplenet_int8.onnx
-
-# ReID — ResNet50 FP16 (Market-1501 + AI City 156, ~92 MB ONNX)
-./scripts/download_reid.sh
-# → models/reid/resnet50_market1501_aicity156.onnx
-
-cd ../..
-```
-
-Both scripts are idempotent — safe to re-run. Verify before proceeding:
-```bash
-ls services/deepstream-jetson/models/peoplenet/   # resnet34_peoplenet_int8.onnx
-ls services/deepstream-jetson/models/reid/         # resnet50_market1501_aicity156.onnx
-```
-
-### Step 3 — Configure environment
-
-```bash
-# Backend database credentials (edit as needed)
-cp backend/.env.example backend/.env   # or create manually:
-cat > backend/.env <<'EOF'
-POSTGRES_USER=atriva
-POSTGRES_PASSWORD=PassworD
-POSTGRES_DB=atrv-retail
-DATABASE_URL=postgresql://atriva:PassworD@db:5432/atrv-retail
-EOF
-```
-
-### Step 4 — Build and start all services
-
-```bash
-docker compose -f docker-compose.jetson.yml up --build
-```
-
-On first run this takes **8–12 minutes** total:
-- Docker image builds: ~5 min (C++ compile, pip installs, Next.js build)
-- TRT engine generation: ~3–5 min per model (PeopleNet + ReID)
-
-TRT engines are written to `services/deepstream-jetson/models/` on the host. Subsequent starts load cached engines and are ready in ~30 seconds.
-
-Expected output when ready:
-```
-deepstream_service  | ZMQ subscriber started on tcp://localhost:5555
-backend             | INFO:     Application startup complete.
-frontend            | ▲ Next.js 15.2.4
-nginx               | ...
-```
-
-### Step 5 — Register cameras and start inference
-
-Once all 5 services are up, register your RTSP cameras. Cameras can be pre-seeded via environment variable or registered via the API:
-
-**Option A — Pre-seed via environment variable** (edit `docker-compose.jetson.yml`):
-```yaml
-environment:
-  - CAMERAS_JSON={"cam1":"rtsp://192.168.x.x:port/stream1","cam2":"rtsp://..."}
-```
-
-**Option B — Register via API after startup:**
-```bash
-curl -X POST "http://localhost:8001/cameras/register?camera_id=cam1&rtsp_url=rtsp://192.168.x.x:port/stream1"
-curl -X POST "http://localhost:8001/cameras/register?camera_id=cam2&rtsp_url=rtsp://192.168.x.x:port/stream2"
-```
-
-The DeepStream pipeline starts automatically on the first camera registration. On first run, TRT engine build begins here if not already cached (~5 min). Subsequent registrations use cached engines and start in ~10 seconds.
-
-### Step 6 — Verify inference
-
-```bash
-# Check pipeline is alive
-curl http://localhost:8001/api/v1/video-pipeline/debug/
-# Expected: {"pipeline_alive": true, "cameras": [...]}
-
-# Check detections are flowing
-curl http://localhost:8001/shared/cameras/cam1/detections/latest
-# Expected: {"camera_id": "cam1", "detections": [{...}]}
-
-# Open the UI
-open http://localhost   # nginx on port 80
-```
-
-### Step 7 — Verify ReID embedding quality (optional)
-
-Run inside the deepstream_service container while streams are active:
-
-```bash
-docker exec -it retail-analytics-app-deepstream_service-1 bash
-cd /workspace
-python3 messaging/zmq/reid_probe.py --endpoint tcp://localhost:5555 --frames 500
-```
-
-Healthy output:
-```
-Coverage:    100%    (every detection carries an embedding)
-Norm:        ~19     (BN output, not L2-normalised — expected)
-Intra-ID:   >0.70   (same person across frames)
-Inter-ID:   <0.55   (different people are well separated)
-Gap:        ≥0.30   (discriminative embeddings)
-```
+For detailed DeepStream pipeline documentation, model configuration, and diagnostic commands, see **[services/deepstream-jetson/README.md](../../services/deepstream-jetson/README.md)**.
 
 ---
 
@@ -358,15 +225,28 @@ core_engine stopped                  ← exits (no real RTSP)
 
 ---
 
-### Bug 2 — nvinfer config relative paths (2026-05-03)
+### Bug 2 — Docker volume mount placed models at wrong path (2026-05-03)
 
-**Symptom:** `ERROR: Cannot access ONNX file '/workspace/core_engine/configs/../../models/reid/...'` — pipeline fails immediately on first run (no cached engine). SGIE fails first (pipeline initialises elements downstream-to-upstream), so PGIE errors were never visible.
+**Symptom:** `ERROR: Cannot access ONNX file '/workspace/core_engine/configs/../../models/reid/...'` — pipeline fails immediately on first run (no cached engine). SGIE fails first (pipeline initialises downstream-to-upstream), so PGIE errors were not visible.
 
-**Root cause:** Both nvinfer configs (`config_infer_primary_peoplenet.txt`, `config_infer_secondary_reid.txt`) used `../../models/` to reference model files. From the config directory `/workspace/core_engine/configs/`, this resolves to `/workspace/models/` — which does not exist in the Docker layout. The correct path is `../models/` (one level up), resolving to `/workspace/core_engine/models/`.
+**Root cause:** The nvinfer configs use `../../models/` relative to their directory (`core_engine/configs/`), which resolves to:
+- **Standalone:** `services/deepstream-jetson/core_engine/configs/../../models/` = `services/deepstream-jetson/models/` ✅
+- **Docker (before fix):** `/workspace/core_engine/configs/../../models/` = `/workspace/models/` — but the volume was mounted at `/workspace/core_engine/models/`, not `/workspace/models/` ❌
 
-The path was correct for host development (where `core_engine/configs/../../` reaches the sibling `models/` directory in the repo), but wrong inside Docker where `core_engine/` is the top-level workspace.
+The configs were correct for both modes; the Docker volume mount was at the wrong path.
 
-**Fix:** Changed `../../models/` → `../models/` in both configs.
+**Fix:**
+1. Changed `docker-compose.jetson.yml` volume mount:
+   ```diff
+   - ./services/deepstream-jetson/models:/workspace/core_engine/models
+   + ./services/deepstream-jetson/models:/workspace/models
+   ```
+2. Updated `Dockerfile` placeholder `mkdir` to match:
+   ```diff
+   - RUN mkdir -p /workspace/core_engine/models/peoplenet /workspace/core_engine/models/reid
+   + RUN mkdir -p /workspace/models/peoplenet /workspace/models/reid
+   ```
+The `../../models/` paths in both config files were left unchanged — they are correct for standalone and Docker alike.
 
 ---
 
@@ -513,10 +393,11 @@ GET http://localhost:8001/shared/cameras/cam1/detections/latest
 
 | File | Change |
 |---|---|
-| `docker-compose.jetson.yml` | Named volume `deepstream_engine_cache` → bind mount `./services/deepstream-jetson/models`; removed orphaned volume declaration |
+| `docker-compose.jetson.yml` | Named volume `deepstream_engine_cache` → bind mount `./services/deepstream-jetson/models:/workspace/models` (correct path so nvinfer `../../models/` resolves correctly inside container); removed orphaned volume declaration |
 | `nginx/conf.d.jetson/default.conf` | New — Jetson-specific nginx config routing `/video-pipeline/` and `/ai-inference/` to `deepstream_service:8001` |
+| `readme.md` | Rewritten — complete Jetson Quick Start (clone → download models → configure env → compose up → register cameras → verify); accurate project structure; environment variables table |
 | `CLAUDE.md` | Updated First-time model setup section; documents bind-mount layout and pre-build download requirement |
-| `.claude/settings.json` | Project-level permission allowlist for docker/git/curl commands |
+| `.gitignore` | New — excludes `.claude/` (personal settings), `backend/.env`, build artifacts |
 | `docs/test-reports/jetson-full-test-2026-05-02.md` | This file |
 
 ### Submodule `services/deepstream-jetson` (`fix/download-reid-create-models-dir`)
@@ -524,10 +405,12 @@ GET http://localhost:8001/shared/cameras/cam1/detections/latest
 | File | Change |
 |---|---|
 | `core_engine/CMakeLists.txt` | `cmake_minimum_required` 3.16 → 3.13 |
-| `core_engine/configs/config_infer_primary_peoplenet.txt` | `../../models/` → `../models/` (path fix) |
-| `core_engine/configs/config_infer_secondary_reid.txt` | `../../models/` → `../models/`; `tlt-encoded-model` → `onnx-file`; `network-type=1` → `100`; removed `tlt-model-key` |
+| `core_engine/configs/config_infer_primary_peoplenet.txt` | Added dual-mode path comment; `../../models/` paths unchanged (correct for both Docker and standalone) |
+| `core_engine/configs/config_infer_secondary_reid.txt` | `tlt-encoded-model` → `onnx-file` with `../../models/` path; `network-type=1` → `100`; removed `tlt-model-key`; added ImageNet normalisation (`offsets`, `net-scale-factor`) |
+| `Dockerfile` | `mkdir` changed from `/workspace/core_engine/models/` → `/workspace/models/` to match volume mount point |
 | `requirements.txt` | Added `python-multipart>=0.0.9` |
 | `scripts/download_reid.sh` | `deployable_v1.0` (ETLT) → `deployable_v1.2` (ONNX) |
 | `README.md` | Added "Prepare models before building" prerequisite section |
+| `.gitignore` | Added `models/reid/` patterns (was missing) |
 | `.dockerignore` | New — excludes build artifacts, models, pycache |
 | `tests/test_deepstream_api.py` | New — 39 unit tests for API layer |

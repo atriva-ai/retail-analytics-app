@@ -85,7 +85,7 @@ services:
       # Download models first (scripts/download_peoplenet.sh + download_reid.sh) before
       # running docker compose up --build. TRT .engine files are auto-generated on first
       # run (~3-5 min) and written back here, so subsequent starts are instant.
-      - ./services/deepstream-jetson/models:/workspace/core_engine/models
+      - ./services/deepstream-jetson/models:/workspace/models
     networks:
       - retail-net
 
