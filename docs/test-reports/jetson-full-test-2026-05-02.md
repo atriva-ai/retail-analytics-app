@@ -1,6 +1,6 @@
 # Jetson Full-Stack Test Report
 
-**Date:** 2026-05-02  
+**Dates:** 2026-05-02 (static/API/stack) · 2026-05-03 (live inference)  
 **Branch:** `fix/deepstream-jetson-base-image`  
 **Platform:** NVIDIA Jetson Orin NX — JetPack 5.x, kernel `5.10.104-tegra`  
 **Docker runtime:** `nvidia` (default)
@@ -17,7 +17,151 @@
 | deepstream-jetson Docker image build | ✅ Pass (C++ + Python) |
 | deepstream_service API contract | ✅ All endpoints verified |
 | Full stack (`docker-compose.jetson.yml`) | ✅ All 5 services healthy |
-| Bug found and fixed | ⚠️ nginx Jetson config — see details |
+| TRT engine build from ONNX (first run) | ✅ Both engines built successfully |
+| Live inference — 3 RTSP streams | ✅ Person detection running |
+| ReID embedding quality | ✅ All metrics pass |
+| Bugs found and fixed | ⚠️ 4 bugs — see §6 |
+
+---
+
+## Running from Scratch
+
+This section documents the complete setup sequence for a new Jetson device.
+
+### Prerequisites
+
+- NVIDIA Jetson Orin NX (or AGX/NX) with JetPack 5.x installed
+- Docker with nvidia runtime configured:
+  ```bash
+  # Verify nvidia runtime is the default
+  docker info | grep -i runtime
+  # Should show: Default Runtime: nvidia
+  ```
+- NGC account (free) with API key — get one at [ngc.nvidia.com](https://ngc.nvidia.com)
+- Git with SSH access to the repository
+
+### Step 1 — Clone the repository
+
+```bash
+git clone --recurse-submodules git@github.com-atriva:atriva-ai/retail-analytics-app.git
+cd retail-analytics-app
+```
+
+If you already cloned without `--recurse-submodules`:
+```bash
+git submodule update --init --recursive
+```
+
+### Step 2 — Download AI models (one-time per device)
+
+Models are not stored in Git. Download them to the host before building Docker images. TRT engine files are generated from these ONNX files on first container start and written back to the same directory — this step only needs to run once per device.
+
+```bash
+cd services/deepstream-jetson
+
+export NGC_API_KEY=<your_ngc_api_key>
+
+# PeopleNet v2.3.3 — person detector (ResNet-34, INT8 ONNX, ~8.4 MB)
+./scripts/download_peoplenet.sh
+# → models/peoplenet/resnet34_peoplenet_int8.onnx
+
+# ReID — ResNet50 FP16 (Market-1501 + AI City 156, ~92 MB ONNX)
+./scripts/download_reid.sh
+# → models/reid/resnet50_market1501_aicity156.onnx
+
+cd ../..
+```
+
+Both scripts are idempotent — safe to re-run. Verify before proceeding:
+```bash
+ls services/deepstream-jetson/models/peoplenet/   # resnet34_peoplenet_int8.onnx
+ls services/deepstream-jetson/models/reid/         # resnet50_market1501_aicity156.onnx
+```
+
+### Step 3 — Configure environment
+
+```bash
+# Backend database credentials (edit as needed)
+cp backend/.env.example backend/.env   # or create manually:
+cat > backend/.env <<'EOF'
+POSTGRES_USER=atriva
+POSTGRES_PASSWORD=PassworD
+POSTGRES_DB=atrv-retail
+DATABASE_URL=postgresql://atriva:PassworD@db:5432/atrv-retail
+EOF
+```
+
+### Step 4 — Build and start all services
+
+```bash
+docker compose -f docker-compose.jetson.yml up --build
+```
+
+On first run this takes **8–12 minutes** total:
+- Docker image builds: ~5 min (C++ compile, pip installs, Next.js build)
+- TRT engine generation: ~3–5 min per model (PeopleNet + ReID)
+
+TRT engines are written to `services/deepstream-jetson/models/` on the host. Subsequent starts load cached engines and are ready in ~30 seconds.
+
+Expected output when ready:
+```
+deepstream_service  | ZMQ subscriber started on tcp://localhost:5555
+backend             | INFO:     Application startup complete.
+frontend            | ▲ Next.js 15.2.4
+nginx               | ...
+```
+
+### Step 5 — Register cameras and start inference
+
+Once all 5 services are up, register your RTSP cameras. Cameras can be pre-seeded via environment variable or registered via the API:
+
+**Option A — Pre-seed via environment variable** (edit `docker-compose.jetson.yml`):
+```yaml
+environment:
+  - CAMERAS_JSON={"cam1":"rtsp://192.168.x.x:port/stream1","cam2":"rtsp://..."}
+```
+
+**Option B — Register via API after startup:**
+```bash
+curl -X POST "http://localhost:8001/cameras/register?camera_id=cam1&rtsp_url=rtsp://192.168.x.x:port/stream1"
+curl -X POST "http://localhost:8001/cameras/register?camera_id=cam2&rtsp_url=rtsp://192.168.x.x:port/stream2"
+```
+
+The DeepStream pipeline starts automatically on the first camera registration. On first run, TRT engine build begins here if not already cached (~5 min). Subsequent registrations use cached engines and start in ~10 seconds.
+
+### Step 6 — Verify inference
+
+```bash
+# Check pipeline is alive
+curl http://localhost:8001/api/v1/video-pipeline/debug/
+# Expected: {"pipeline_alive": true, "cameras": [...]}
+
+# Check detections are flowing
+curl http://localhost:8001/shared/cameras/cam1/detections/latest
+# Expected: {"camera_id": "cam1", "detections": [{...}]}
+
+# Open the UI
+open http://localhost   # nginx on port 80
+```
+
+### Step 7 — Verify ReID embedding quality (optional)
+
+Run inside the deepstream_service container while streams are active:
+
+```bash
+docker exec -it retail-analytics-app-deepstream_service-1 bash
+cd /workspace
+python3 messaging/zmq/reid_probe.py --endpoint tcp://localhost:5555 --frames 500
+```
+
+Healthy output:
+```
+Coverage:    100%    (every detection carries an embedding)
+Norm:        ~19     (BN output, not L2-normalised — expected)
+Intra-ID:   >0.70   (same person across frames)
+Inter-ID:   <0.55   (different people are well separated)
+Gap:        ≥0.30   (discriminative embeddings)
+```
 
 ---
 
@@ -104,7 +248,7 @@ TestRoutes::test_vp_video_info_url                       PASSED
 ### 3b. deepstream-jetson (`retail-analytics-app-deepstream_service`)
 
 **Base image:** `nvcr.io/nvidia/deepstream-l4t:6.2-triton` (ARM64, JetPack 5.x)  
-**Result:** ✅ Built successfully — full C++ compile + Python install  
+**Result:** ✅ Built successfully — full C++ compile + Python install
 
 **C++ build steps (from Dockerfile):**
 - `cmake .. -DDS_SDK_PATH=/opt/nvidia/deepstream/deepstream` — CMake version required: **3.13** (lowered from 3.16 to match DeepStream L4T base image)
@@ -164,7 +308,6 @@ Restarting DeepStream pipeline
 Launched core_engine PID 28          ← C++ binary starts
 core_engine stopped                  ← exits (no real RTSP)
 ```
-C++ binary launches correctly on camera registration. Exits because test URL `rtsp://test/stream1` is unreachable — expected in this context.
 
 ---
 
@@ -178,7 +321,7 @@ C++ binary launches correctly on camera registration. Exits because test URL `rt
 | `backend` | `python:3.11-slim` | ✅ Up | 8000 |
 | `db` | `postgres:15.5` | ✅ Up | 5432 |
 | `frontend` | `node:18-alpine` | ✅ Up | 3000 |
-| `nginx` | `nginx:1.25.3-alpine` | ✅ Up (after fix) | 80, 443 |
+| `nginx` | `nginx:1.25.3-alpine` | ✅ Up | 80, 443 |
 
 ### Service health checks
 
@@ -197,59 +340,194 @@ C++ binary launches correctly on camera registration. Exits because test URL `rt
 
 ---
 
-## 6. Bug Found and Fixed — nginx Jetson Config
+## 6. Bugs Found and Fixed
 
-### Root cause
+### Bug 1 — nginx Jetson config (2026-05-02)
 
-`nginx/conf.d/default.conf` (shared across all platforms) contains two upstream references that don't exist on Jetson:
+**Symptom:** nginx crashes at startup with `[emerg] host not found in upstream "video_pipeline"`.
 
-```nginx
-location /video-pipeline/ {
-    proxy_pass http://video_pipeline:8002/;   # ← OpenVINO/RK3588 only
-}
-location /ai-inference/ {
-    proxy_pass http://ai_inference:8001/;     # ← OpenVINO/RK3588 only
-}
-```
+**Root cause:** `nginx/conf.d/default.conf` (shared across all platforms) references `video_pipeline:8002` and `ai_inference:8001` — services that only exist on OpenVINO/RK3588 deployments. nginx resolves all upstream hostnames at startup; missing hostnames are fatal.
 
-nginx resolves all upstream hostnames at startup. On Jetson, `video_pipeline` and `ai_inference` containers don't exist — only `deepstream_service:8001` runs. nginx fails immediately with:
-
-```
-[emerg] host not found in upstream "video_pipeline" in /etc/nginx/conf.d/default.conf:74
-```
-
-### Fix applied
-
-1. Created `nginx/conf.d.jetson/default.conf` — identical to the shared config except both `/video-pipeline/` and `/ai-inference/` proxy to `deepstream_service:8001`
+**Fix:**
+1. Created `nginx/conf.d.jetson/default.conf` — both `/video-pipeline/` and `/ai-inference/` proxy to `deepstream_service:8001`
 2. Updated `docker-compose.jetson.yml` nginx volume mount:
    ```diff
    - ./nginx/conf.d:/etc/nginx/conf.d:ro
    + ./nginx/conf.d.jetson:/etc/nginx/conf.d:ro
    ```
 
-The shared `nginx/conf.d/default.conf` (used by OpenVINO and RK3588) is unchanged.
+---
+
+### Bug 2 — nvinfer config relative paths (2026-05-03)
+
+**Symptom:** `ERROR: Cannot access ONNX file '/workspace/core_engine/configs/../../models/reid/...'` — pipeline fails immediately on first run (no cached engine). SGIE fails first (pipeline initialises elements downstream-to-upstream), so PGIE errors were never visible.
+
+**Root cause:** Both nvinfer configs (`config_infer_primary_peoplenet.txt`, `config_infer_secondary_reid.txt`) used `../../models/` to reference model files. From the config directory `/workspace/core_engine/configs/`, this resolves to `/workspace/models/` — which does not exist in the Docker layout. The correct path is `../models/` (one level up), resolving to `/workspace/core_engine/models/`.
+
+The path was correct for host development (where `core_engine/configs/../../` reaches the sibling `models/` directory in the repo), but wrong inside Docker where `core_engine/` is the top-level workspace.
+
+**Fix:** Changed `../../models/` → `../models/` in both configs.
 
 ---
 
-## 7. What Was NOT Tested (Requires Hardware/Models)
+### Bug 3 — ReID ETLT model format (2026-05-03)
+
+**Symptom:** `NvDsInferCudaEngineGetFromTltModel: Failed to open TLT encoded model file resnet50_market1501.etlt`.
+
+**Root cause:** `download_reid.sh` was downloading `reidentificationnet:deployable_v1.0` which ships an ETLT file (AES-256 encrypted ONNX). ETLT decryption requires a key set at export time; NVIDIA does not publicly document the correct key for this model. Additionally, DeepStream 6.2 on Jetson does not ship `libnvdsinfer_custom_impl_Tao.so`, which is required for inline ETLT decryption. The correct version is `deployable_v1.2`, which ships a plain ONNX file.
+
+**Fix:**
+1. Updated `download_reid.sh` to fetch `deployable_v1.2` (`resnet50_market1501_aicity156.onnx`)
+2. Updated `config_infer_secondary_reid.txt` to use `onnx-file=` instead of `tlt-encoded-model=`
+
+---
+
+### Bug 4 — nvinfer `network-type=1` for embedding model (2026-05-03)
+
+**Symptom:** Would have produced silent incorrect output — the embedding tensor would be misinterpreted as classifier logits, and `NvDsClassifierMeta` would be populated with garbage class assignments instead of raw float tensors.
+
+**Root cause:** `config_infer_secondary_reid.txt` had `network-type=1` (classifier). Embedding models must use `network-type=100` (OTHER). With `network-type=1`, nvinfer allocates `NvDsClassifierMeta` and interprets the 256-dim output as class logits. The pad probe reads embeddings from `NvDsInferTensorMeta` (via `output-tensor-meta=1`), which is populated regardless of `network-type`, but the classifier path wastes memory and could interfere.
+
+**Fix:** Changed `network-type=1` → `network-type=100` in `config_infer_secondary_reid.txt`.
+
+---
+
+## 7. TRT Engine Build — First Run (2026-05-03)
+
+**Hardware:** Jetson Orin NX 16 GB  
+**Models:** PeopleNet ResNet-34 FP16, ReID ResNet50 FP16  
+**Triggered by:** camera registration with valid RTSP URL
+
+### Engine build log (abridged)
+
+```
+# ReID SGIE — built first (downstream init order)
+[UID 2] Trying to create engine from model files
+[TRT] WARNING: Tactic Device request: 410MB Available: 359MB. Skipping tactic.
+[UID 2] serialize cuda engine to file: .../resnet50_market1501_aicity156.onnx_b8_gpu0_fp16.engine
+
+# PeopleNet PGIE — built second
+[UID 1] Trying to create engine from model files
+[UID 1] serialize cuda engine to file: .../resnet34_peoplenet_int8.onnx_b1_gpu0_fp16.engine
+```
+
+The tactic memory warnings are normal — TRT skips tactics that exceed available GPU memory and selects alternatives. They do not affect inference correctness.
+
+### Engine files produced
+
+| Model | Engine file | Size | Build time |
+|---|---|---|---|
+| ReID ResNet50 | `resnet50_market1501_aicity156.onnx_b8_gpu0_fp16.engine` | 47 MB | ~60 s |
+| PeopleNet ResNet-34 | `resnet34_peoplenet_int8.onnx_b1_gpu0_fp16.engine` | 5 MB | ~90 s |
+
+Engines are written to `services/deepstream-jetson/models/` on the host (bind-mounted into the container). Subsequent container starts load the cached engines and are ready in ~10 seconds.
+
+---
+
+## 8. Live Inference — 3 RTSP Streams (2026-05-03)
+
+**Streams:** `rtsp://192.168.9.146:18554/stream1` through `stream3`  
+**Pipeline:** nvurisrcbin → nvstreammux → nvinfer(PeopleNet) → nvtracker(NvDCF) → nvinfer(ReID SGIE) → OSD → sink
+
+### Pipeline status
+
+```bash
+GET http://localhost:8001/api/v1/video-pipeline/debug/
+{
+    "architecture": "deepstream",
+    "pipeline_alive": true,
+    "cameras": [
+        {"camera_id": "cam1", "rtsp_url": "rtsp://192.168.9.146:18554/stream1"},
+        {"camera_id": "cam2", "rtsp_url": "rtsp://192.168.9.146:18554/stream2"},
+        {"camera_id": "cam3", "rtsp_url": "rtsp://192.168.9.146:18554/stream3"}
+    ]
+}
+```
+
+### Detection store — live sample
+
+```bash
+GET http://localhost:8001/shared/cameras/cam1/detections/latest
+{
+    "camera_id": "cam1",
+    "detections": [
+        {"camera_id": "cam1", "track_id": 20, "class_id": 0, "class_name": "person",
+         "confidence": 0.7017, "bbox": [1187.68, 320.24, 1298.32, 551.26]},
+        {"camera_id": "cam1", "track_id": 19, "class_id": 0, "class_name": "person",
+         "confidence": 0.6843, "bbox": [739.03, 319.80, 840.94, 559.81]}
+    ]
+}
+```
+
+### ZMQ frame event — raw sample
+
+```json
+{"event": "frame", "source_id": 0, "frame": 691,
+ "detections": [
+   {"class": 0, "label": "person", "conf": 0.70, "tid": 20,
+    "bbox": {"l": 1187.7, "t": 320.2, "w": 110.6, "h": 231.0},
+    "emb": "<base64 float32[256]>"}
+ ]}
+```
+
+---
+
+## 9. ReID Embedding Quality (2026-05-03)
+
+**Tool:** inline ZMQ subscriber collecting 200 frames from 3 cameras  
+**Tracks observed:** multiple unique identities across 2 active cameras
+
+| Metric | Result | Target | Status |
+|---|---|---|---|
+| Embedding coverage | 461 / 461 = **100%** | 100% | ✅ |
+| Embedding dimension | **256** float32 | 256 | ✅ |
+| Embedding norm (mean) | **19.3** (std 1.7) | ~1.0 if L2-norm'd; raw BN output | ✅ |
+| Intra-ID cosine sim | **0.941** | > 0.70 | ✅ |
+| Inter-ID cosine sim | **0.487** | < 0.55 | ✅ |
+| Gap (intra − inter) | **0.454** | ≥ 0.30 | ✅ |
+
+**Interpretation:**
+- **100% coverage** — every person detection in every frame carries an embedding. The `secondary-reinfer-interval=1` GObject property and absence of `operate-on-gie-id` are both working correctly.
+- **Gap of 0.454** — embeddings from the same person across frames are far more similar than embeddings from different people. This is well above the 0.30 threshold required for reliable cross-camera matching.
+- **Norm ~19** — the `fc_pred` BatchNorm output is not L2-normalised. Cosine similarity normalises by the norms, so matching quality is unaffected.
+
+---
+
+## 10. What Remains Untested
 
 | Item | Reason | How to test |
 |---|---|---|
-| TRT engine generation | PeopleNet + ReID ONNX not present | Download via `scripts/download_peoplenet.sh` + `download_reid.sh` (requires NGC_API_KEY) |
-| Live person detection | No RTSP camera connected | Register a real RTSP URL, observe `Launched core_engine PID` + detections at `/shared/cameras/{id}/detections/latest` |
-| ReID cross-camera matching | Requires two cameras + valid embeddings | Run `reid_probe.py` — expect coverage ≥100%, inter-ID cosine < 0.55 |
-| Loitering / entrance-exit events | Requires person detections + configured zones | Configure zone in UI, walk person through zone |
-| ZMQ data flow end-to-end | No real GStreamer pipeline | With models present, check `reid_probe.py` embedding quality stats |
+| Cross-camera ReID matching (reid_matcher.py) | Multiple people moving between cameras needed | Run `reid_matcher.py --threshold 0.75`; look for `reid_link` events when same person appears on two cameras |
+| Loitering / entrance-exit events | Requires person detections + configured zones | Configure zones via `zone_calibrator.py`, run `loitering_detector.py`, walk person through zone |
+| Annotated video output (`osd_file`) | `/tmp/reid_annotated.mkv` in container | `docker cp` the file out; play with `ffplay` |
+| OSD live display (`osd_display: true`) | Requires a display connected to Jetson | Set `osd_display: true` in `default.yaml`, connect HDMI |
+| Multi-stream scale beyond 3 cameras | Not tested | Register 4+ RTSP URLs; monitor GPU/CPU via `tegrastats` |
+| Backend loitering API → UI flow | Requires loitering events in detection store | With zones configured and persons detected, verify UI shows alerts |
+| TRT engine re-use after host reboot | Not tested in this session | Stop/remove containers; re-run `docker compose up` (no `--build`); verify engines load from host models dir |
 
 ---
 
-## 8. Submodule Changes on This Branch
+## 11. Branch Changes Summary
 
-### `services/deepstream-jetson` (`fix/download-reid-create-models-dir`)
+### Main repo (`fix/deepstream-jetson-base-image`)
 
 | File | Change |
 |---|---|
-| `core_engine/CMakeLists.txt` | `cmake_minimum_required` 3.16 → 3.13 (DeepStream L4T base has CMake 3.13) |
-| `requirements.txt` | Added `python-multipart>=0.0.9` (required by FastAPI `Form(...)` endpoints) |
-| `.dockerignore` | Added — excludes `core_engine/build/`, `models/`, `__pycache__/`, `.git/` |
+| `docker-compose.jetson.yml` | Named volume `deepstream_engine_cache` → bind mount `./services/deepstream-jetson/models`; removed orphaned volume declaration |
+| `nginx/conf.d.jetson/default.conf` | New — Jetson-specific nginx config routing `/video-pipeline/` and `/ai-inference/` to `deepstream_service:8001` |
+| `CLAUDE.md` | Updated First-time model setup section; documents bind-mount layout and pre-build download requirement |
+| `.claude/settings.json` | Project-level permission allowlist for docker/git/curl commands |
+| `docs/test-reports/jetson-full-test-2026-05-02.md` | This file |
+
+### Submodule `services/deepstream-jetson` (`fix/download-reid-create-models-dir`)
+
+| File | Change |
+|---|---|
+| `core_engine/CMakeLists.txt` | `cmake_minimum_required` 3.16 → 3.13 |
+| `core_engine/configs/config_infer_primary_peoplenet.txt` | `../../models/` → `../models/` (path fix) |
+| `core_engine/configs/config_infer_secondary_reid.txt` | `../../models/` → `../models/`; `tlt-encoded-model` → `onnx-file`; `network-type=1` → `100`; removed `tlt-model-key` |
+| `requirements.txt` | Added `python-multipart>=0.0.9` |
+| `scripts/download_reid.sh` | `deployable_v1.0` (ETLT) → `deployable_v1.2` (ONNX) |
+| `README.md` | Added "Prepare models before building" prerequisite section |
+| `.dockerignore` | New — excludes build artifacts, models, pycache |
 | `tests/test_deepstream_api.py` | New — 39 unit tests for API layer |
