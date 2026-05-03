@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh run *)",
+      "Bash(docker build *)",
+      "Bash(docker run *)",
+      "Bash(docker rm *)",
+      "Bash(docker stop *)",
+      "Bash(docker compose *)",
+      "Bash(docker network *)",
+      "Bash(docker info *)",
+      "Bash(docker version *)",
+      "Bash(pip3 install *)",
+      "Bash(pip3 show *)",
+      "Bash(nvidia-smi *)",
+      "Bash(tegrastats *)",
+      "Bash(systemctl status *)",
+      "Bash(dpkg -l *)",
+      "Bash(gst-inspect-1.0 *)",
+      "Bash(/home/wesley/work/ngc-cli/ngc registry *)",
+      "Bash(curl -s *)",
+      "Bash(curl -sf *)",
+      "Bash(curl -so *)",
+      "Bash(curl -sI *)"
+    ]
+  }
+}

@@ -81,8 +81,11 @@ services:
     ports:
       - "8001:8001"
     volumes:
-      # Persist TRT .engine files — expensive to regenerate (~5 min per model on first run)
-      - deepstream_engine_cache:/workspace/core_engine/models
+      # Bind-mount the host models directory directly.
+      # Download models first (scripts/download_peoplenet.sh + download_reid.sh) before
+      # running docker compose up --build. TRT .engine files are auto-generated on first
+      # run (~3-5 min) and written back here, so subsequent starts are instant.
+      - ./services/deepstream-jetson/models:/workspace/core_engine/models
     networks:
       - retail-net
 
@@ -104,7 +107,6 @@ services:
 volumes:
   pgdata:
   frontend_node_modules:
-  deepstream_engine_cache:
 
 networks:
   retail-net:
