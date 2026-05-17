@@ -43,6 +43,52 @@ make -j$(nproc)
 
 Override DeepStream path if non-standard: `cmake -DDS_SDK_PATH=/opt/nvidia/deepstream/deepstream-6.2 ..`
 
+## Docker — Build & Maintenance
+
+**This project builds large GPU images (DeepStream base ~8 GB). Disk fills fast during active development. Always clean before rebuilding.**
+
+### Standard build + test cycle (Jetson)
+
+```bash
+# 1. Purge previous build artefacts — do this every time before rebuilding
+docker compose -f docker-compose.jetson.yml down -v --remove-orphans
+docker system prune -f          # removes stopped containers, dangling images, build cache
+docker volume prune -f          # removes volumes NOT in use — safe after the down -v above
+                                 # (pgdata is recreated on next up; TRT engines are bind-mounted)
+
+# 2. Verify disk headroom — DeepStream image alone is ~8 GB; need ≥ 15 GB free
+df -h /
+
+# 3. Fresh build
+docker compose -f docker-compose.jetson.yml build
+
+# 4. Start stack
+docker compose -f docker-compose.jetson.yml up
+```
+
+> **Why `down -v`?** Named volumes (`pgdata`, `frontend_node_modules`) from a previous compose
+> version become orphans and accumulate silently. `-v` removes them along with the containers so
+> each test run starts from a known-clean state.
+
+### Quick disk check
+
+```bash
+docker system df          # shows images / containers / volumes / build cache sizes
+df -h /                   # overall disk usage
+```
+
+### Nuclear clean (when disk is critically full)
+
+```bash
+docker system prune -af --volumes   # removes ALL images, containers, volumes, cache
+```
+
+> **Do NOT delete `services/deepstream-jetson/models/`** — TRT `.engine` files live there
+> (bind-mount) and take ~5 min to regenerate. Only delete engines if you change the model or
+> precision (fp16 → int8).
+
+---
+
 ## First-time model setup
 
 **Run these on the host before building the Docker image** (one-time per device):
